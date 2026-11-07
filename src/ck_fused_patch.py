@@ -123,12 +123,15 @@ class _Fused:
                 x[a:b], w, s, sh, h[a:b], res[a:b], amax, K, eps,
                 BLOCK_K=BLOCK_K, N_CHUNK=n_chunk, num_warps=8,
             )
-        qscale = (amax / fk.F8_E4M3_MAX).clamp_min(1e-12)
         q = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
         n = q.numel()
-        fk._quant_fp8_kernel[(-(-n // 4096),)](
-            h, q, qscale, fk.F8_E4M3_MAX, n, BLOCK=4096, num_warps=4,
+        # A3' device-scale: phase B 直接吃 amax 指针，kernel 内算 scale，
+        # phase A/B 之间无 host 参与（消除 per-site GPU->CPU 同步）
+        fk._quant_fp8_amax_kernel[(-(-n // 4096),)](
+            h, q, amax, fk.F8_E4M3_MAX, n,
+            SCALE_MIN=1e-12, BLOCK=4096, num_warps=4,
         )
+        qscale = (amax / fk.F8_E4M3_MAX).clamp_min(1e-12)  # 仅供 Params；不阻塞量化
         params = self.Fp8Layout.Params(scale=qscale, orig_dtype=x.dtype, orig_shape=(S, K))
         return self.QuantizedTensor(q, "TensorCoreFP8E4M3Layout", params)
 

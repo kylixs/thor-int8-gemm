@@ -89,8 +89,32 @@ def _quant_fp8_kernel(
     tl.store(q_ptr + offs, clamped.to(tl.float8e4nv), mask=m)
 
 
+@triton.jit
+def _quant_fp8_amax_kernel(
+    h_ptr, q_ptr, amax_ptr,
+    lp_max, n_elements,
+    SCALE_MIN: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """A3' device-scale 版：phase B 直接读 device 上的 amax 指针，
+    kernel 内算 scale = max(amax/448, 1e-12) 再除/钳位/RTN——host 全程不碰数，
+    消除两阶段设计里每个量化位点一次的 GPU->CPU 同步。
+    数学与 _quant_fp8_kernel 逐位一致（fp32 除法＋同 clamp 语义）。"""
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    m = offs < n_elements
+    amax = tl.load(amax_ptr)
+    scale = tl.maximum(amax / lp_max, SCALE_MIN)
+    h = tl.load(h_ptr + offs, mask=m, other=0.0).to(tl.float32)
+    scaled = h / scale
+    clamped = tl.minimum(tl.maximum(scaled, -lp_max), lp_max)
+    tl.store(q_ptr + offs, clamped.to(tl.float8e4nv), mask=m)
+
+
 def _make_scale(amax: torch.Tensor) -> torch.Tensor:
-    """amax(fp32 标量) -> scale，避免除 0。"""
+    """amax(fp32 标量) -> scale，避免除 0。device 上的异步小算子，仅供
+    下游 QuantizedTensor.Params 等需要 scale 张量的场合；phase B 量化
+    不再依赖它（走 _quant_fp8_amax_kernel）。"""
     return (amax / F8_E4M3_MAX).clamp_min(1e-12)
 
 
@@ -111,12 +135,13 @@ def fused_rms_mod_quant(
         x, w, s, b, h, res, amax, K, eps,
         BLOCK_K=BLOCK_K, N_CHUNK=n_chunk, num_warps=num_warps,
     )
-    scale = _make_scale(amax)
     q = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
     n = q.numel()
-    _quant_fp8_kernel[(triton.cdiv(n, QBLOCK),)](
-        h, q, scale, F8_E4M3_MAX, n, BLOCK=QBLOCK, num_warps=q_num_warps,
+    _quant_fp8_amax_kernel[(triton.cdiv(n, QBLOCK),)](
+        h, q, amax, F8_E4M3_MAX, n, SCALE_MIN=1e-12, BLOCK=QBLOCK,
+        num_warps=q_num_warps,
     )
+    scale = _make_scale(amax)  # 仅供下游 Params；不阻塞量化
     return q, scale, h, res
 
 
@@ -133,9 +158,10 @@ def fused_swiglu_quant(
     _swiglu_amax_kernel[(triton.cdiv(n, BLOCK),)](
         gate, up, act, amax, n, BLOCK=BLOCK, num_warps=num_warps,
     )
-    scale = _make_scale(amax)
     q = torch.empty(gate.shape, dtype=torch.float8_e4m3fn, device=gate.device)
-    _quant_fp8_kernel[(triton.cdiv(n, QBLOCK),)](
-        act, q, scale, F8_E4M3_MAX, n, BLOCK=QBLOCK, num_warps=q_num_warps,
+    _quant_fp8_amax_kernel[(triton.cdiv(n, QBLOCK),)](
+        act, q, amax, F8_E4M3_MAX, n, SCALE_MIN=1e-12, BLOCK=QBLOCK,
+        num_warps=q_num_warps,
     )
+    scale = _make_scale(amax)  # 仅供下游 Params；不阻塞量化
     return q, scale, act
