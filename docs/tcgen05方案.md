@@ -23,8 +23,14 @@
 - T1 数据（10 配置×3 形状）：int8 最优 **82.3 TOPS**（128×256×128 / 256×128×128），
   低于朴素指针版 98.4 ⇒ TMA/WS 机制在 IMMA 路径上是负优化；
 - bf16 persistent（108 TFLOPS）确认是 tcgen05 路径的真实水平参考；
-- **结论：tcgen05 int8 路线关闭，等 Triton 上游实现 int8-tcgen05 后重启**
-  （重启时 bf16 108 的 persistent 模板可直接换 dtype）。生产继续用 cuBLASLt（172）。
+- **结论（2026-11-08 补强）：tcgen05 int8 在 Thor 是硬件墙，永久关闭**——
+  NVIDIA 官方 issue
+  [triton#11923](https://github.com/triton-lang/triton/issues/11923)：
+  "tcgen05 INT8 is supported **only on SM100**, so Thor **correctly falls back** to
+  mma.sync"——不是 Triton 缺陷、等版本也没用（换 SM100 硬件才有）。
+  bf16/TF32/FP16 的 tcgen05 在 Thor 可用（与我们 UTCHMMA 实测一致）。
+- 生产继续用 cuBLASLt（172）；其 kernel 名含 "sm100" 只是 cutlass 模板族名，
+  在 sm_110 上实际以宽 mma.sync 达 172（仍为 int8 在 Thor 的实测最优）。
 
 ## 2. 核心假设（本方案要验证的）
 
