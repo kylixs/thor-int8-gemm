@@ -1,5 +1,49 @@
 # thor-int8-gemm
 
+**[English](#english) | [中文](#中文)**
+
+---
+
+<a name="english"></a>
+## English
+
+Performance tuning & forensics for comfy-kitchen INT8 GEMM on Jetson Thor (sm_110, unified-memory Blackwell).
+Background: comfy-kitchen's int8 kernel sustains only ~50 TOPS on Thor — 2.4× *slower* than plain bf16 cuBLAS (120 TFLOPS). This repo carries the full evidence chain, a Triton fused-dequant port (from the GB10 solution), tile sweeps, and the cuBLASLt route that finally shipped to production. Upstream: [comfy-kitchen#312](https://github.com/Comfy-Org/comfy-kitchen/issues/312), prior art [#280](https://github.com/Comfy-Org/comfy-kitchen/issues/280) (GB10/sm_121, same disease).
+
+### Approaches (weights untouched in all three)
+1. **Triton fused-dequant port** (`src/ck_int8_patch_thor.py`) — ports the GB10-validated Triton kernel (int32 accumulate + fused dequant epilogue, `.pth` import-proxy swapping `_C.cutlass_int8_dequant`) to sm_110; 168-config tile sweep.
+2. **Direct cuBLASLt** (`src/ck_int8_patch_intmm.py`) — raw `torch._int_mm`.
+3. **kitchen's built-in cublas fallback** — container env `COMFY_KITCHEN_DISABLE_CUTLASS=1`, zero code (shipped to production).
+
+### Results (real MiniMax H3 DiT layer shapes, M=8k–112k)
+
+| Path | TOPS | Notes |
+|---|---|---|
+| kitchen stock (cutlass / PTX-JIT, no sm_110 cubin) | 50–55 | baseline |
+| Triton port (GB10 config verbatim) | 73.3 | ×1.32 |
+| **Triton local sweep best `128×128×128 w4s3g8`** | **98.4** | **×1.78**; BK=128 + 4 warps is the key |
+| cuBLASLt sustained / isolated replay | **172 / 310** | `cutlass3x_sm100 i256x256x32` (wide tcgen05 path) |
+
+Triton ceiling: SASS contains only `IMMA.16832.S8` (narrow legacy MMA) and tensor-pipe activity is hard-capped at 72.5% (ncu, tile-independent) ⇒ theoretical max ~120 TOPS — cannot reach cuBLASLt.
+
+### Engine-level impact (MiniMax H3 ref2va, 720p/5s, 6 steps)
+
+| | stock | Triton patch | **cublas route (production)** |
+|---|---|---|---|
+| DiT step | 41.0s | ~34s (est.) | **22.9s (−44%)** |
+| End-to-end | 326s | ~245s (est.) | **173s (−47%)** |
+
+Correctness: Triton and `torch._int_mm` are both `torch.equal` to stock (kernel level); the cublas route differs 10–13% at video level (epilogue float ordering → chaotic divergence; VLM judged quality-equivalent).
+
+### Layout
+`src/` both patches + upstream original · `bench/` sweep & bench scripts, `sweep_results.jsonl` (all 168 configs) · `tests/` bit-exactness · `docs/` write-ups.
+Environment: Thor devkit (96 SM @1386MHz, 120W mode), torch 2.15+cu132, comfy-kitchen 0.2.40.
+
+---
+
+<a name="中文"></a>
+## 中文
+
 Jetson Thor（sm_110，统一内存 Blackwell）上 comfy-kitchen INT8 GEMM 的性能调优与取证。
 背景：comfy-kitchen 的 int8 kernel 在 Thor 上只有 ~50 TOPS，比朴素 bf16 cuBLAS（120 TFLOPS）还慢 2.4×——本仓给出完整证据链、Triton fused-dequant 移植（GB10 方案）、tile 扫描，以及最终生产采用的 cuBLASLt 路线对照。上游 issue：[comfy-kitchen#312](https://github.com/Comfy-Org/comfy-kitchen/issues/312)、参照 [#280](https://github.com/Comfy-Org/comfy-kitchen/issues/280)（GB10/sm_121 同病）。
 
