@@ -16,6 +16,16 @@
 | 关键规律 | stages 越少越快（s2>s3>s4）＝**SMEM 227KB 是约束**；BK=128（bf16）直接爆 SMEM |
 | 参照系 | cuBLASLt int8＝172 TOPS 持续（`i256x256x32` kernel） |
 
+## 1.5 执行结果（2026-11-07 深夜，T1 止损关闭）
+
+- **风险 A 触发**：int8 persistent TMA-WS kernel 的 SASS 仍是 `IMMA.16832.S8`——
+  **Triton 3.9.0 的 tcgen05 lowering 只支持 bf16（UTCHMMA），int8 变体未实现**；
+- T1 数据（10 配置×3 形状）：int8 最优 **82.3 TOPS**（128×256×128 / 256×128×128），
+  低于朴素指针版 98.4 ⇒ TMA/WS 机制在 IMMA 路径上是负优化；
+- bf16 persistent（108 TFLOPS）确认是 tcgen05 路径的真实水平参考；
+- **结论：tcgen05 int8 路线关闭，等 Triton 上游实现 int8-tcgen05 后重启**
+  （重启时 bf16 108 的 persistent 模板可直接换 dtype）。生产继续用 cuBLASLt（172）。
+
 ## 2. 核心假设（本方案要验证的）
 
 **int8 数据宽度是 bf16 的一半 ⇒ 同 SMEM 预算下 tile 可以加倍**
