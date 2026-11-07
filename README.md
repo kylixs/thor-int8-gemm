@@ -39,6 +39,31 @@ Correctness: Triton and `torch._int_mm` are both `torch.equal` to stock (kernel 
 `src/` both patches + upstream original · `bench/` sweep & bench scripts, `sweep_results.jsonl` (all 168 configs) · `tests/` bit-exactness · `docs/` write-ups.
 Environment: Thor devkit (96 SM @1386MHz, 120W mode), torch 2.15+cu132, comfy-kitchen 0.2.40.
 
+## Background / Why it matters / Use cases / Roadmap
+
+### Background
+Jetson Thor (sm_110) and DGX Spark (GB10, sm_121) are unified-memory Blackwell parts. comfy-kitchen — the kernel library behind ComfyUI's quantized checkpoints (int8_convrot etc. for MiniMax H3, Qwen-Image …) — ships **no sm_110/sm_110a cubins**, so on these devices its INT8 GEMM runs via PTX JIT on a generic path and sustains only ~50 TOPS. Absurdly, that is **2.4× slower than plain bf16 cuBLAS**, i.e. the entire benefit of INT8 quantization is inverted on this hardware class. The same disease on GB10 was documented in comfy-kitchen#280.
+
+### Why this project matters
+- **End-user impact**: MiniMax H3 (and other int8_convrot models) render ~47% faster once the right GEMM path is chosen — measured end-to-end on a production pipeline (326s → 173s for 720p/5s).
+- **Evidence chain**: V0 (missing cubins, cuobjdump) → V1 (flat 50 TOPS ceiling, 43W "full" load) → ncu (54%/72.5% tensor-pipe caps) → SASS (only `IMMA.16832` emitted) — a reusable playbook for diagnosing "quantized slower than fp16" on any Blackwell unified-memory device.
+- **Upstream leverage**: everything here (bench harness, tile table, ncu data) is directly usable by comfy-kitchen maintainers; issue #312 offers a PR.
+
+### Potential applications
+- Any ComfyUI user on Jetson Thor / AGX Thor devkits running int8/w4a8 checkpoints (video DiT, image DiT).
+- A reference for porting GB10-style Triton fused-dequant kernels to other under-served archs (sm_110 siblings).
+- The `.pth` proxy pattern (version-guarded, auto-fallback to stock) is a safe A/B mechanism for any kernel experiment in production.
+- cuBLASLt fallback via `COMFY_KITCHEN_DISABLE_CUTLASS=1` is a **zero-code workaround** usable today.
+
+### Roadmap / open directions
+- [ ] Round-2 sweep: BK=256, num_ctas (CGA) 2/4, stages 2/6, narrow tiles (running)
+- [ ] TMA (`tl.make_tensor_descriptor`) arm — async copies free warps for MMA
+- [ ] Warp specialization on Blackwell Triton
+- [ ] Upstream: PR tile table `128×128×128 w4s3g8` for sm_110 (pending maintainer reply on #312)
+- [ ] cuBLASLt sustained-vs-isolated gap (172 vs 310 TOPS): clock-governor investigation; note tcgen05 async cores may not be counted by `sm__pipe_tensor`
+- [ ] fp8_scaled weights arm (tcgen05-wide path, theoretical ~2× over int8)
+
+
 ---
 
 <a name="中文"></a>
@@ -81,3 +106,10 @@ Triton 天花板判定：SASS 只有 `IMMA.16832.S8`（窄指令），张量核�
 - `docs/` 方案、扫描记录（中文）、上游 writeup
 
 环境：Thor devkit（96SM@1386MHz、120W 档）、torch 2.15+cu132、comfy-kitchen 0.2.40、triton 随 torch。
+
+### 背景 / 意义 / 应用 / 后续（中文摘要）
+- **背景**：Thor（sm_110）与 DGX Spark（GB10/sm_121）同属统一内存 Blackwell；comfy-kitchen 不带 sm_110 原生 cubin，INT8 GEMM 走 PTX JIT 只有 ~50 TOPS——**比朴素 bf16 还慢 2.4×**，量化收益整体倒挂（GB10 同病见 #280）。
+- **意义**：选对 GEMM 路径后 MiniMax H3 生产渲染快 47%（326→173s/720p·5s）；V0→V1→ncu→SASS 的证据链是排查"量化反而更慢"的通用方法论；全套数据可直接支撑上游 PR（#312）。
+- **应用场景**：Thor/AGX Thor 上跑 int8/w4a8 检查点的 ComfyUI 用户；向其他冷门架构移植 GB10 式 Triton kernel 的参照；`.pth` 代理（版本守卫＋自动回落）是生产环境 kernel 实验的安全范式；`COMFY_KITCHEN_DISABLE_CUTLASS=1` 是今天就能用的零代码规避。
+- **后续方向**：第二轮扫描（BK256/num_ctas/stages，跑中）；TMA 与 warp-specialization 臂；上游 tile 表 PR；cuBLASLt 持续 172 vs 隔离 310 的频率调查；fp8 权重臂（理论再 ×2）。
+
