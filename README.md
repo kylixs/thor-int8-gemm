@@ -56,7 +56,9 @@ Jetson Thor (sm_110) and DGX Spark (GB10, sm_121) are unified-memory Blackwell p
 - cuBLASLt fallback via `COMFY_KITCHEN_DISABLE_CUTLASS=1` is a **zero-code workaround** usable today.
 
 ### Roadmap / open directions
-- [ ] Round-2 sweep: BK=256, num_ctas (CGA) 2/4, stages 2/6, narrow tiles (running)
+- [x] Round-2 sweep: no gain (98.6 confirmed ceiling for the plain-pointer kernel)
+- [x] tcgen05 ON: stable Triton 3.9.0 already emits tcgen05 on sm_110 — **trigger = TMA tensor descriptors + `warp_specialize=True`** (TTGIR `tc_gen5_mma`, SASS `UTCHMMA`); plain-pointer kernels fall back to `IMMA.16832`
+- [ ] Rewrite the int8 fused-dequant kernel in persistent TMA+WS form (tutorial-09 pattern, TMEM multi-buffer + autotune): naive TMA-WS prototype only reaches 31 TFLOPS (bf16) vs cuBLAS 120 — the gate is open but needs proper kernel structure; upside ~cuBLASLt-class 172+ for the upstream-fixable Triton path
 - [ ] TMA (`tl.make_tensor_descriptor`) arm — async copies free warps for MMA
 - [ ] Warp specialization on Blackwell Triton
 - [ ] Upstream: PR tile table `128×128×128 w4s3g8` for sm_110 (pending maintainer reply on #312)
